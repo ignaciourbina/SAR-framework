@@ -37,6 +37,8 @@ class Config:
     GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
     GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
     SEARCH_ENGINE_ID = os.environ.get('SEARCH_ENGINE_ID')
+    TAVILY_API_KEY = os.environ.get('TAVILY_API_KEY')
+    SEARCH_PROVIDER = os.environ.get('SEARCH_PROVIDER', 'google')
 
     @staticmethod
     def init_app(app):

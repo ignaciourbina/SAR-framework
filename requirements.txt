@@ -8,6 +8,7 @@ google-generativeai
 
 # Search and scraping
 google-api-python-client
+tavily-python
 beautifulsoup4
 lxml
 playwright

@@ -9,10 +9,13 @@ import fitz   # PyMuPDF for parsing PDFs
 from googleapiclient.discovery import build
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
+from tavily import TavilyClient
 
 # --- Configuration ---
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 SEARCH_ENGINE_ID = os.getenv("SEARCH_ENGINE_ID")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "google")
 logger = logging.getLogger(__name__)
 
 # --- Service Functions ---
@@ -32,6 +35,39 @@ def perform_google_search(query: str, limit: int = 5) -> list:
         print(f"An error occurred during Google Search: {e}")
         logger.error(f"Search Service: Error during Google Search API call: {e}")
         return []
+
+
+def perform_tavily_search(query: str, limit: int = 5) -> list:
+    """Performs a Tavily search and returns a list of results
+    normalized to match the Google Custom Search result format."""
+    print(f"Executing Tavily Search for query: '{query}'...")
+    logger.info("Search Service: Executing Tavily Search API call.")
+    try:
+        client = TavilyClient(api_key=TAVILY_API_KEY)
+        response = client.search(
+            query=query,
+            max_results=limit,
+            search_depth="advanced",
+        )
+        raw_results = response.get("results", [])
+        # Normalize to match Google result structure (title, link, snippet, content)
+        search_items = []
+        for item in raw_results:
+            search_items.append({
+                "title": item.get("title", ""),
+                "link": item.get("url", ""),
+                "snippet": item.get("content", ""),
+                "content": item.get("content", ""),
+                "score": item.get("score", 0),
+            })
+        print(f"Tavily Search complete. Found {len(search_items)} results.")
+        logger.info(f"Search Service: Found {len(search_items)} results from Tavily Search.")
+        return search_items
+    except Exception as e:
+        print(f"An error occurred during Tavily Search: {e}")
+        logger.error(f"Search Service: Error during Tavily Search API call: {e}")
+        return []
+
 
 # PROPOSED REVISION for app/services/search_service.py
 async def fetch_and_parse_pdf_async(url: str, index: int) -> str:
@@ -154,52 +190,64 @@ async def search_and_fetch_content(query: str) -> dict:
     print(f"\n--- Starting Search and Fetch for query: '{query}' ---")
     logger.info(f"Search Service: Received query '{query}'. Starting orchestration.")
     
-    # Step 1: Perform the initial Google Search
-    print("\n[Step 1/4] Performing Google Custom Search...")
-    search_results = perform_google_search(query)
-    
+    # Step 1: Perform search using configured provider
+    provider = SEARCH_PROVIDER.lower()
+    if provider == "tavily":
+        print("\n[Step 1/4] Performing Tavily Search...")
+        search_results = perform_tavily_search(query)
+    else:
+        print("\n[Step 1/4] Performing Google Custom Search...")
+        search_results = perform_google_search(query)
+
     if not search_results:
-        print("[Step 1/4] Google Search returned no results. Ending process.")
+        print("[Step 1/4] Search returned no results. Ending process.")
         logger.warning("Search Service: No search results returned. Ending process.")
         return {"results": []}
-    print(f"[Step 1/4] Google Search finished.")
+    print(f"[Step 1/4] Search finished.")
 
-    # Step 2: Asynchronously fetch content for each result
-    print("\n[Step 2/4] Initializing parsers to fetch content.")
-    logger.info("Search Service: Launching headless browser to fetch content for all results.")
-    async with async_playwright() as p:
-        browser = await p.chromium.launch()
-        print("             Browser for HTML parsing launched successfully.")
-        
-        tasks = []
-        print("             Creating and queuing tasks, routing by content type (HTML/PDF)...")
-        logger.info("Search Service: Creating and queuing all fetcher tasks.")
+    # Tavily returns pre-extracted content — skip the fetch-and-parse pipeline
+    if provider == "tavily":
+        print("\n[Step 2/4] Tavily provides pre-extracted content. Skipping fetch pipeline.")
+        print("[Step 3/4] Skipped (Tavily).")
+        print("\n[Step 4/4] Results already combined from Tavily response.")
+        logger.info("Search Service: Using Tavily pre-extracted content. Skipping browser fetch.")
+    else:
+        # Step 2: Asynchronously fetch content for each result (Google path)
+        print("\n[Step 2/4] Initializing parsers to fetch content.")
+        logger.info("Search Service: Launching headless browser to fetch content for all results.")
+        async with async_playwright() as p:
+            browser = await p.chromium.launch()
+            print("             Browser for HTML parsing launched successfully.")
+
+            tasks = []
+            print("             Creating and queuing tasks, routing by content type (HTML/PDF)...")
+            logger.info("Search Service: Creating and queuing all fetcher tasks.")
+            for i, item in enumerate(search_results):
+                url = item['link']
+                # ROUTER: Check the URL extension and append the correct parsing task.
+                if url.lower().endswith('.pdf'):
+                    tasks.append(fetch_and_parse_pdf_async(url, i))
+                else:
+                    tasks.append(fetch_and_parse_html_async(browser, url, i))
+
+            print(f"[Step 2/4] {len(tasks)} fetching tasks have been created.")
+
+            # Step 3: Run all fetching tasks concurrently
+            print(f"\n[Step 3/4] Executing {len(tasks)} fetcher tasks in parallel...")
+            logger.info(f"Search Service: Executing {len(tasks)} fetcher tasks concurrently...")
+            contents = await asyncio.gather(*tasks)
+            print("[Step 3/4] All content fetching tasks have completed.")
+            logger.info("Search Service: All fetcher tasks have completed.")
+
+            await browser.close()
+            print("             Browser closed.")
+
+        # Step 4: Combine search results with their fetched content
+        print("\n[Step 4/4] Combining search result metadata with the fetched content...")
+        logger.info("Search Service: Combining search data with fetched content.")
         for i, item in enumerate(search_results):
-            url = item['link']
-            # ROUTER: Check the URL extension and append the correct parsing task.
-            if url.lower().endswith('.pdf'):
-                tasks.append(fetch_and_parse_pdf_async(url, i))
-            else:
-                tasks.append(fetch_and_parse_html_async(browser, url, i))
-        
-        print(f"[Step 2/4] {len(tasks)} fetching tasks have been created.")
-        
-        # Step 3: Run all fetching tasks concurrently
-        print(f"\n[Step 3/4] Executing {len(tasks)} fetcher tasks in parallel...")
-        logger.info(f"Search Service: Executing {len(tasks)} fetcher tasks concurrently...")
-        contents = await asyncio.gather(*tasks)
-        print("[Step 3/4] All content fetching tasks have completed.")
-        logger.info("Search Service: All fetcher tasks have completed.")
-        
-        await browser.close()
-        print("             Browser closed.")
-
-    # Step 4: Combine search results with their fetched content
-    print("\n[Step 4/4] Combining search result metadata with the fetched content...")
-    logger.info("Search Service: Combining search data with fetched content.")
-    for i, item in enumerate(search_results):
-        item['content'] = contents[i]
-    print("[Step 4/4] Combination complete.")
+            item['content'] = contents[i]
+        print("[Step 4/4] Combination complete.")
         
     print("\n--- Search and Fetch process finished successfully. ---")
     logger.info("Search Service: Orchestration complete. Returning final results.")
